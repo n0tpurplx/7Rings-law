@@ -1,0 +1,1 @@
+# 7Rings-law
