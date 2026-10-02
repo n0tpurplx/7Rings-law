@@ -1,10 +1,10 @@
-
 import os
 import time
 import sqlite3
 import asyncio
-import discord
 
+import discord
+from aiohttp import web
 from discord import app_commands
 from discord.ext import commands
 
@@ -23,7 +23,6 @@ WARRANT_CONFIRMATION_CHANNEL_ID = 1555233076056039524
 FINE_CONFIRMATION_CHANNEL_ID = 1555233224052187297
 
 DEPARTMENT = "State Patrol"
-
 DB_PATH = "cad.db"
 
 if not DISCORD_TOKEN:
@@ -39,58 +38,60 @@ db.row_factory = sqlite3.Row
 
 db.execute("PRAGMA journal_mode=WAL")
 
-db.executescript("""
-CREATE TABLE IF NOT EXISTS units (
-    discord_id INTEGER PRIMARY KEY,
-    callsign TEXT UNIQUE,
-    status TEXT NOT NULL DEFAULT '10-7',
-    department TEXT NOT NULL DEFAULT 'State Patrol',
-    joined_at INTEGER NOT NULL
-);
+db.executescript(
+    """
+    CREATE TABLE IF NOT EXISTS units (
+        discord_id INTEGER PRIMARY KEY,
+        callsign TEXT UNIQUE,
+        status TEXT NOT NULL DEFAULT '10-7',
+        department TEXT NOT NULL DEFAULT 'State Patrol',
+        joined_at INTEGER NOT NULL
+    );
 
-CREATE TABLE IF NOT EXISTS bolos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    model TEXT NOT NULL,
-    color TEXT NOT NULL,
-    plate TEXT NOT NULL,
-    description TEXT,
-    issuer_id INTEGER NOT NULL,
-    issuer_name TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    active INTEGER NOT NULL DEFAULT 1
-);
+    CREATE TABLE IF NOT EXISTS bolos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        model TEXT NOT NULL,
+        color TEXT NOT NULL,
+        plate TEXT NOT NULL,
+        description TEXT,
+        issuer_id INTEGER NOT NULL,
+        issuer_name TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1
+    );
 
-CREATE TABLE IF NOT EXISTS fines (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    target_id INTEGER NOT NULL,
-    issuer_id INTEGER NOT NULL,
-    amount INTEGER NOT NULL,
-    reason TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    created_at INTEGER NOT NULL,
-    decided_at INTEGER
-);
+    CREATE TABLE IF NOT EXISTS fines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_id INTEGER NOT NULL,
+        issuer_id INTEGER NOT NULL,
+        amount INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        decided_at INTEGER
+    );
 
-CREATE TABLE IF NOT EXISTS warrants (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    target_name TEXT NOT NULL,
-    armed INTEGER NOT NULL,
-    reason TEXT NOT NULL,
-    requester_id INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'awaiting_requester',
-    created_at INTEGER NOT NULL,
-    decided_at INTEGER,
-    supervisor_id INTEGER
-);
+    CREATE TABLE IF NOT EXISTS warrants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_name TEXT NOT NULL,
+        armed INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        requester_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'awaiting_requester',
+        created_at INTEGER NOT NULL,
+        decided_at INTEGER,
+        supervisor_id INTEGER
+    );
 
-CREATE TABLE IF NOT EXISTS audit_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    actor_id INTEGER NOT NULL,
-    action TEXT NOT NULL,
-    details TEXT NOT NULL,
-    created_at INTEGER NOT NULL
-);
-""")
+    CREATE TABLE IF NOT EXISTS audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        actor_id INTEGER NOT NULL,
+        action TEXT NOT NULL,
+        details TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    """
+)
 
 db.commit()
 
@@ -102,7 +103,12 @@ def audit(actor_id, action, details):
         (actor_id, action, details, created_at)
         VALUES (?, ?, ?, ?)
         """,
-        (actor_id, action, details, int(time.time()))
+        (
+            actor_id,
+            action,
+            details,
+            int(time.time()),
+        ),
     )
     db.commit()
 
@@ -116,11 +122,10 @@ def timestamp(value):
 # =====================================================
 
 intents = discord.Intents.default()
-intents.members = True
 
 bot = commands.Bot(
     command_prefix="!",
-    intents=intents
+    intents=intents,
 )
 
 
@@ -158,6 +163,7 @@ def cad_command(**kwargs):
         return app_commands.check(whitelist_check)(
             app_commands.command(**kwargs)(func)
         )
+
     return decorator
 
 
@@ -166,6 +172,7 @@ def manager_command(**kwargs):
         return app_commands.check(manager_check)(
             app_commands.command(**kwargs)(func)
         )
+
     return decorator
 
 
@@ -174,6 +181,7 @@ def supervisor_command(**kwargs):
         return app_commands.check(supervisor_check)(
             app_commands.command(**kwargs)(func)
         )
+
     return decorator
 
 
@@ -182,88 +190,131 @@ def supervisor_command(**kwargs):
 # =====================================================
 
 STATUS_CHOICES = [
-    app_commands.Choice(name="10-8 | In Service", value="10-8"),
-    app_commands.Choice(name="10-7 | Out of Service", value="10-7"),
-    app_commands.Choice(name="10-6 | Busy", value="10-6"),
-    app_commands.Choice(name="10-23 | On Scene", value="10-23"),
-    app_commands.Choice(name="10-11 | Traffic Stop", value="10-11"),
-    app_commands.Choice(name="10-15 | Transporting", value="10-15"),
+    app_commands.Choice(
+        name="10-8 | In Service",
+        value="10-8",
+    ),
+    app_commands.Choice(
+        name="10-7 | Out of Service",
+        value="10-7",
+    ),
+    app_commands.Choice(
+        name="10-6 | Busy",
+        value="10-6",
+    ),
+    app_commands.Choice(
+        name="10-23 | On Scene",
+        value="10-23",
+    ),
+    app_commands.Choice(
+        name="10-11 | Traffic Stop",
+        value="10-11",
+    ),
+    app_commands.Choice(
+        name="10-15 | Transporting",
+        value="10-15",
+    ),
 ]
 
 
-@cad_command(name="dp", description="Change your State Patrol status.")
+@cad_command(
+    name="dp",
+    description="Change your State Patrol status.",
+)
 @app_commands.describe(status="Your new unit status")
 @app_commands.choices(status=STATUS_CHOICES)
 async def dp(
     interaction: discord.Interaction,
-    status: app_commands.Choice[str]
+    status: app_commands.Choice[str],
 ):
     row = db.execute(
         "SELECT * FROM units WHERE discord_id = ?",
-        (interaction.user.id,)
+        (interaction.user.id,),
     ).fetchone()
 
     if not row:
         await interaction.response.send_message(
             "You are not registered as a State Patrol unit. "
             "Ask a department manager to add you.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
 
     db.execute(
         "UPDATE units SET status = ? WHERE discord_id = ?",
-        (status.value, interaction.user.id)
+        (
+            status.value,
+            interaction.user.id,
+        ),
     )
     db.commit()
 
     audit(
         interaction.user.id,
         "STATUS_CHANGE",
-        status.value
+        status.value,
     )
 
     await interaction.response.send_message(
         f"Your State Patrol status is now **{status.value}**.",
-        ephemeral=True
+        ephemeral=True,
     )
 
 
-@cad_command(name="units", description="View State Patrol units.")
-async def units(interaction: discord.Interaction):
+# =====================================================
+# UNIT ROSTER
+# =====================================================
+
+async def build_units_embed(guild):
     rows = db.execute(
-        """
-        SELECT units.*, users.username
-        FROM units
-        LEFT JOIN (
-            SELECT discord_id, callsign
-            FROM units
-        ) AS users ON users.discord_id = units.discord_id
-        ORDER BY callsign
-        """
+        "SELECT * FROM units ORDER BY callsign"
     ).fetchall()
 
     if not rows:
-        await interaction.response.send_message(
-            "No State Patrol personnel have been registered.",
-            ephemeral=True
-        )
-        return
+        return None
 
     embed = discord.Embed(
         title="State Patrol | Unit Roster",
-        color=discord.Color.dark_blue()
+        color=discord.Color.dark_blue(),
     )
 
     for row in rows:
-        member = interaction.guild.get_member(row["discord_id"])
-        name = member.display_name if member else f"User {row['discord_id']}"
+        member = guild.get_member(row["discord_id"])
+
+        if member is None:
+            try:
+                member = await guild.fetch_member(row["discord_id"])
+            except (discord.NotFound, discord.HTTPException):
+                member = None
+
+        name = (
+            member.display_name
+            if member
+            else f"User {row['discord_id']}"
+        )
 
         embed.add_field(
             name=f"{row['callsign']} | {name}",
             value=f"Status: **{row['status']}**",
-            inline=False
+            inline=False,
         )
+
+    return embed
+
+
+@cad_command(
+    name="units",
+    description="View State Patrol units.",
+)
+async def units(interaction: discord.Interaction):
+    embed = await build_units_embed(interaction.guild)
+
+    if embed is None:
+        await interaction.response.send_message(
+            "No State Patrol personnel have been registered.",
+            ephemeral=True,
+        )
+        return
 
     await interaction.response.send_message(embed=embed)
 
@@ -274,23 +325,23 @@ async def units(interaction: discord.Interaction):
 
 @manager_command(
     name="staff_add",
-    description="Register a State Patrol member."
+    description="Register a State Patrol member.",
 )
 @app_commands.describe(
     member="Discord member",
-    callsign="Their assigned callsign"
+    callsign="Their assigned callsign",
 )
 async def staff_add(
     interaction: discord.Interaction,
     member: discord.Member,
-    callsign: str
+    callsign: str,
 ):
     callsign = callsign.strip().upper()
 
     if not callsign or len(callsign) > 20:
         await interaction.response.send_message(
             "Please provide a valid callsign.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
 
@@ -307,22 +358,23 @@ async def staff_add(
                 member.id,
                 callsign,
                 DEPARTMENT,
-                int(time.time())
-            )
+                int(time.time()),
+            ),
         )
+
         db.commit()
 
     except sqlite3.IntegrityError:
         await interaction.response.send_message(
             "That callsign is already assigned to another unit.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
 
     audit(
         interaction.user.id,
         "STAFF_ADDED",
-        f"{member.id} assigned {callsign}"
+        f"{member.id} assigned {callsign}",
     )
 
     await interaction.response.send_message(
@@ -332,29 +384,30 @@ async def staff_add(
 
 @manager_command(
     name="staff_remove",
-    description="Remove a member from the State Patrol roster."
+    description="Remove a member from the State Patrol roster.",
 )
 async def staff_remove(
     interaction: discord.Interaction,
-    member: discord.Member
+    member: discord.Member,
 ):
     cursor = db.execute(
         "DELETE FROM units WHERE discord_id = ?",
-        (member.id,)
+        (member.id,),
     )
+
     db.commit()
 
     if cursor.rowcount == 0:
         await interaction.response.send_message(
             "That member is not registered.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
 
     audit(
         interaction.user.id,
         "STAFF_REMOVED",
-        str(member.id)
+        str(member.id),
     )
 
     await interaction.response.send_message(
@@ -364,35 +417,54 @@ async def staff_remove(
 
 @manager_command(
     name="staff_list",
-    description="View the State Patrol roster."
+    description="View the State Patrol roster.",
 )
 async def staff_list(interaction: discord.Interaction):
-    await units(interaction)
+    embed = await build_units_embed(interaction.guild)
+
+    if embed is None:
+        await interaction.response.send_message(
+            "No State Patrol personnel have been registered.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(embed=embed)
 
 
 # =====================================================
 # BOLO SYSTEM
 # =====================================================
 
-@cad_command(name="bolo", description="Create a vehicle BOLO.")
+@cad_command(
+    name="bolo",
+    description="Create a vehicle BOLO.",
+)
 @app_commands.describe(
     model="Vehicle model",
     color="Vehicle color",
     plate="License plate",
-    description="Additional identifying information"
+    description="Additional identifying information",
 )
 async def bolo(
     interaction: discord.Interaction,
     model: str,
     color: str,
     plate: str,
-    description: str = "No additional information"
+    description: str = "No additional information",
 ):
     cursor = db.execute(
         """
         INSERT INTO bolos
-        (model, color, plate, description, issuer_id,
-         issuer_name, created_at)
+        (
+            model,
+            color,
+            plate,
+            description,
+            issuer_id,
+            issuer_name,
+            created_at
+        )
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
@@ -402,9 +474,10 @@ async def bolo(
             description,
             interaction.user.id,
             interaction.user.display_name,
-            int(time.time())
-        )
+            int(time.time()),
+        ),
     )
+
     db.commit()
 
     bolo_id = cursor.lastrowid
@@ -412,39 +485,74 @@ async def bolo(
     audit(
         interaction.user.id,
         "BOLO_CREATED",
-        f"BOLO #{bolo_id}: {model}, {color}, {plate}"
+        f"BOLO #{bolo_id}: {model}, {color}, {plate}",
     )
 
     embed = discord.Embed(
         title=f"Active BOLO #{bolo_id}",
-        color=discord.Color.orange()
+        color=discord.Color.orange(),
     )
-    embed.add_field(name="Vehicle", value=model, inline=True)
-    embed.add_field(name="Color", value=color, inline=True)
-    embed.add_field(name="Plate", value=plate.upper(), inline=True)
-    embed.add_field(name="Description", value=description, inline=False)
-    embed.add_field(name="Issued By", value=interaction.user.mention)
+
+    embed.add_field(
+        name="Vehicle",
+        value=model,
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Color",
+        value=color,
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Plate",
+        value=plate.upper(),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Description",
+        value=description,
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Issued By",
+        value=interaction.user.mention,
+    )
+
     embed.timestamp = discord.utils.utcnow()
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(
+        embed=embed
+    )
 
 
-@cad_command(name="bolos", description="View active BOLOs.")
+@cad_command(
+    name="bolos",
+    description="View active BOLOs.",
+)
 async def bolos(interaction: discord.Interaction):
     rows = db.execute(
-        "SELECT * FROM bolos WHERE active = 1 ORDER BY created_at DESC"
+        """
+        SELECT *
+        FROM bolos
+        WHERE active = 1
+        ORDER BY created_at DESC
+        """
     ).fetchall()
 
     if not rows:
         await interaction.response.send_message(
             "There are no active BOLOs.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
 
     embed = discord.Embed(
         title="Active State Patrol BOLOs",
-        color=discord.Color.orange()
+        color=discord.Color.orange(),
     )
 
     for row in rows[:25]:
@@ -456,34 +564,48 @@ async def bolos(interaction: discord.Interaction):
                 f"Issued by: {row['issuer_name']}\n"
                 f"Created: {timestamp(row['created_at'])}"
             ),
-            inline=False
+            inline=False,
         )
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(
+        embed=embed
+    )
 
 
-@cad_command(name="bolo_clear", description="Clear an active BOLO.")
+@cad_command(
+    name="bolo_clear",
+    description="Clear an active BOLO.",
+)
+@app_commands.describe(
+    bolo_id="BOLO ID to clear",
+)
 async def bolo_clear(
     interaction: discord.Interaction,
-    bolo_id: int
+    bolo_id: int,
 ):
     cursor = db.execute(
-        "UPDATE bolos SET active = 0 WHERE id = ? AND active = 1",
-        (bolo_id,)
+        """
+        UPDATE bolos
+        SET active = 0
+        WHERE id = ?
+        AND active = 1
+        """,
+        (bolo_id,),
     )
+
     db.commit()
 
     if cursor.rowcount == 0:
         await interaction.response.send_message(
             "That active BOLO could not be found.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
 
     audit(
         interaction.user.id,
         "BOLO_CLEARED",
-        str(bolo_id)
+        str(bolo_id),
     )
 
     await interaction.response.send_message(
@@ -498,89 +620,139 @@ async def bolo_clear(
 class FineView(discord.ui.View):
     def __init__(self, fine_id, target_id):
         super().__init__(timeout=604800)
+
         self.fine_id = fine_id
         self.target_id = target_id
 
-    async def decide(self, interaction, accepted):
+    async def decide(
+        self,
+        interaction: discord.Interaction,
+        accepted: bool,
+    ):
         if interaction.user.id != self.target_id:
             await interaction.response.send_message(
                 "Only the designated recipient can respond to this fine.",
-                ephemeral=True
+                ephemeral=True,
             )
             return
 
         row = db.execute(
             "SELECT status FROM fines WHERE id = ?",
-            (self.fine_id,)
+            (self.fine_id,),
         ).fetchone()
 
         if not row or row["status"] != "pending":
             await interaction.response.send_message(
                 "This fine has already been resolved.",
-                ephemeral=True
+                ephemeral=True,
             )
             return
 
-        new_status = "accepted" if accepted else "declined"
+        new_status = (
+            "accepted"
+            if accepted
+            else "declined"
+        )
 
         db.execute(
             """
             UPDATE fines
             SET status = ?, decided_at = ?
-            WHERE id = ? AND status = 'pending'
+            WHERE id = ?
+            AND status = 'pending'
             """,
-            (new_status, int(time.time()), self.fine_id)
+            (
+                new_status,
+                int(time.time()),
+                self.fine_id,
+            ),
         )
+
         db.commit()
 
         audit(
             interaction.user.id,
             "FINE_DECISION",
-            f"Fine #{self.fine_id}: {new_status}"
+            f"Fine #{self.fine_id}: {new_status}",
         )
 
         for child in self.children:
             child.disabled = True
 
         await interaction.response.edit_message(
-            content=f"Fine #{self.fine_id}: **{new_status.upper()}**",
-            view=self
+            content=(
+                f"Fine #{self.fine_id}: "
+                f"**{new_status.upper()}**"
+            ),
+            view=self,
         )
 
-    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
-    async def accept(self, interaction, button):
-        await self.decide(interaction, True)
+    @discord.ui.button(
+        label="Accept",
+        style=discord.ButtonStyle.success,
+    )
+    async def accept(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await self.decide(
+            interaction,
+            True,
+        )
 
-    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
-    async def decline(self, interaction, button):
-        await self.decide(interaction, False)
+    @discord.ui.button(
+        label="Decline",
+        style=discord.ButtonStyle.danger,
+    )
+    async def decline(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await self.decide(
+            interaction,
+            False,
+        )
 
 
-@cad_command(name="fine", description="Issue a pending fine.")
+@cad_command(
+    name="fine",
+    description="Issue a pending fine.",
+)
 @app_commands.describe(
     target="Person receiving the fine",
     amount="Fine amount",
-    reason="Reason for the fine"
+    reason="Reason for the fine",
 )
 async def fine(
     interaction: discord.Interaction,
     target: discord.Member,
     amount: app_commands.Range[int, 1, 1000000],
-    reason: str
+    reason: str,
 ):
-    channel = bot.get_channel(FINE_CONFIRMATION_CHANNEL_ID)
+    channel = bot.get_channel(
+        FINE_CONFIRMATION_CHANNEL_ID
+    )
 
     if not isinstance(channel, discord.TextChannel):
         await interaction.response.send_message(
             "The fine confirmation channel is unavailable.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
 
     cursor = db.execute(
         """
         INSERT INTO fines
-        (target_id, issuer_id, amount, reason, status, created_at)
+        (
+            target_id,
+            issuer_id,
+            amount,
+            reason,
+            status,
+            created_at
+        )
         VALUES (?, ?, ?, ?, 'pending', ?)
         """,
         (
@@ -588,56 +760,85 @@ async def fine(
             interaction.user.id,
             amount,
             reason,
-            int(time.time())
-        )
+            int(time.time()),
+        ),
     )
+
     db.commit()
 
     fine_id = cursor.lastrowid
 
     embed = discord.Embed(
         title=f"Fine #{fine_id} | Confirmation Required",
-        color=discord.Color.gold()
+        color=discord.Color.gold(),
     )
-    embed.add_field(name="Recipient", value=target.mention)
-    embed.add_field(name="Amount", value=f"${amount:,}")
-    embed.add_field(name="Reason", value=reason, inline=False)
-    embed.add_field(name="Issued By", value=interaction.user.mention)
+
+    embed.add_field(
+        name="Recipient",
+        value=target.mention,
+    )
+
+    embed.add_field(
+        name="Amount",
+        value=f"${amount:,}",
+    )
+
+    embed.add_field(
+        name="Reason",
+        value=reason,
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Issued By",
+        value=interaction.user.mention,
+    )
 
     await channel.send(
         content=target.mention,
         embed=embed,
-        view=FineView(fine_id, target.id)
+        view=FineView(
+            fine_id,
+            target.id,
+        ),
     )
 
     audit(
         interaction.user.id,
         "FINE_ISSUED",
-        f"Fine #{fine_id} for {target.id}: ${amount}"
+        f"Fine #{fine_id} for {target.id}: ${amount}",
     )
 
     await interaction.response.send_message(
         f"Fine **#{fine_id}** sent to the separate confirmation channel.",
-        ephemeral=True
+        ephemeral=True,
     )
 
 
-@cad_command(name="fines", description="View fine records.")
+@cad_command(
+    name="fines",
+    description="View fine records.",
+)
 async def fines(interaction: discord.Interaction):
     rows = db.execute(
-        "SELECT * FROM fines ORDER BY created_at DESC LIMIT 25"
+        """
+        SELECT *
+        FROM fines
+        ORDER BY created_at DESC
+        LIMIT 25
+        """
     ).fetchall()
 
     if not rows:
         await interaction.response.send_message(
             "No fines have been recorded.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
 
     embed = discord.Embed(
         title="Fine Records",
-        color=discord.Color.gold()
+        color=discord.Color.gold(),
     )
 
     for row in rows:
@@ -649,10 +850,12 @@ async def fines(interaction: discord.Interaction):
                 f"Status: **{row['status'].upper()}**\n"
                 f"Created: {timestamp(row['created_at'])}"
             ),
-            inline=False
+            inline=False,
         )
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(
+        embed=embed
+    )
 
 
 # =====================================================
@@ -660,211 +863,314 @@ async def fines(interaction: discord.Interaction):
 # =====================================================
 
 class WarrantRequesterView(discord.ui.View):
-    def __init__(self, warrant_id, requester_id):
+    def __init__(
+        self,
+        warrant_id,
+        requester_id,
+    ):
         super().__init__(timeout=604800)
+
         self.warrant_id = warrant_id
         self.requester_id = requester_id
 
     @discord.ui.button(
         label="Confirm Request",
-        style=discord.ButtonStyle.primary
+        style=discord.ButtonStyle.primary,
     )
-    async def confirm(self, interaction, button):
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
         if interaction.user.id != self.requester_id:
             await interaction.response.send_message(
                 "Only the original requester can confirm this warrant.",
-                ephemeral=True
+                ephemeral=True,
             )
             return
 
         row = db.execute(
             "SELECT * FROM warrants WHERE id = ?",
-            (self.warrant_id,)
+            (self.warrant_id,),
         ).fetchone()
 
         if not row or row["status"] != "awaiting_requester":
             await interaction.response.send_message(
                 "This request has already been processed.",
-                ephemeral=True
+                ephemeral=True,
             )
             return
-
-        db.execute(
-            "UPDATE warrants SET status = 'awaiting_supervisor' WHERE id = ?",
-            (self.warrant_id,)
-        )
-        db.commit()
 
         supervisor_channel = bot.get_channel(
             WARRANT_CONFIRMATION_CHANNEL_ID
         )
 
-        if not isinstance(supervisor_channel, discord.TextChannel):
+        if not isinstance(
+            supervisor_channel,
+            discord.TextChannel,
+        ):
             await interaction.response.send_message(
                 "Supervisor review channel is unavailable.",
-                ephemeral=True
+                ephemeral=True,
             )
             return
 
-        embed = discord.Embed(
-            title=f"Warrant #{self.warrant_id} | Supervisor Review",
-            color=discord.Color.red()
+        db.execute(
+            """
+            UPDATE warrants
+            SET status = 'awaiting_supervisor'
+            WHERE id = ?
+            """,
+            (self.warrant_id,),
         )
-        embed.add_field(name="Target", value=row["target_name"])
+
+        db.commit()
+
+        embed = discord.Embed(
+            title=(
+                f"Warrant #{self.warrant_id} "
+                "| Supervisor Review"
+            ),
+            color=discord.Color.red(),
+        )
+
+        embed.add_field(
+            name="Target",
+            value=row["target_name"],
+        )
+
         embed.add_field(
             name="Armed",
-            value="Yes" if row["armed"] else "No"
+            value=(
+                "Yes"
+                if row["armed"]
+                else "No"
+            ),
         )
-        embed.add_field(name="Reason", value=row["reason"], inline=False)
+
+        embed.add_field(
+            name="Reason",
+            value=row["reason"],
+            inline=False,
+        )
+
         embed.add_field(
             name="Requested By",
-            value=f"<@{row['requester_id']}>"
+            value=f"<@{row['requester_id']}>",
         )
 
         await supervisor_channel.send(
             content=f"<@&{SUPERVISOR_ROLE_ID}>",
             embed=embed,
-            view=WarrantSupervisorView(self.warrant_id)
+            view=WarrantSupervisorView(
+                self.warrant_id
+            ),
         )
 
         for child in self.children:
             child.disabled = True
 
         await interaction.response.edit_message(
-            content=f"Warrant #{self.warrant_id} submitted for supervisor review.",
-            view=self
+            content=(
+                f"Warrant #{self.warrant_id} "
+                "submitted for supervisor review."
+            ),
+            view=self,
         )
 
     @discord.ui.button(
         label="Cancel Request",
-        style=discord.ButtonStyle.danger
+        style=discord.ButtonStyle.danger,
     )
-    async def cancel(self, interaction, button):
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
         if interaction.user.id != self.requester_id:
             await interaction.response.send_message(
                 "Only the original requester can cancel this request.",
-                ephemeral=True
+                ephemeral=True,
             )
             return
 
         db.execute(
-            "UPDATE warrants SET status = 'cancelled' WHERE id = ? "
-            "AND status = 'awaiting_requester'",
-            (self.warrant_id,)
+            """
+            UPDATE warrants
+            SET status = 'cancelled'
+            WHERE id = ?
+            AND status = 'awaiting_requester'
+            """,
+            (self.warrant_id,),
         )
+
         db.commit()
 
         for child in self.children:
             child.disabled = True
 
         await interaction.response.edit_message(
-            content=f"Warrant #{self.warrant_id} request cancelled.",
-            view=self
+            content=(
+                f"Warrant #{self.warrant_id} "
+                "request cancelled."
+            ),
+            view=self,
         )
 
 
 class WarrantSupervisorView(discord.ui.View):
     def __init__(self, warrant_id):
         super().__init__(timeout=604800)
+
         self.warrant_id = warrant_id
 
-    async def review(self, interaction, approved):
+    async def review(
+        self,
+        interaction: discord.Interaction,
+        approved: bool,
+    ):
         if not await supervisor_check(interaction):
             await interaction.response.send_message(
                 "You are not authorized to review warrants.",
-                ephemeral=True
+                ephemeral=True,
             )
             return
 
         row = db.execute(
             "SELECT status FROM warrants WHERE id = ?",
-            (self.warrant_id,)
+            (self.warrant_id,),
         ).fetchone()
 
         if not row or row["status"] != "awaiting_supervisor":
             await interaction.response.send_message(
                 "This warrant has already been reviewed.",
-                ephemeral=True
+                ephemeral=True,
             )
             return
 
-        status = "approved" if approved else "denied"
+        status = (
+            "approved"
+            if approved
+            else "denied"
+        )
 
         db.execute(
             """
             UPDATE warrants
-            SET status = ?, decided_at = ?, supervisor_id = ?
+            SET
+                status = ?,
+                decided_at = ?,
+                supervisor_id = ?
             WHERE id = ?
             """,
             (
                 status,
                 int(time.time()),
                 interaction.user.id,
-                self.warrant_id
-            )
+                self.warrant_id,
+            ),
         )
+
         db.commit()
 
         audit(
             interaction.user.id,
             "WARRANT_REVIEW",
-            f"Warrant #{self.warrant_id}: {status}"
+            f"Warrant #{self.warrant_id}: {status}",
         )
 
         for child in self.children:
             child.disabled = True
 
         await interaction.response.edit_message(
-            content=f"Warrant #{self.warrant_id}: **{status.upper()}**",
-            view=self
+            content=(
+                f"Warrant #{self.warrant_id}: "
+                f"**{status.upper()}**"
+            ),
+            view=self,
         )
 
     @discord.ui.button(
         label="Approve",
-        style=discord.ButtonStyle.success
+        style=discord.ButtonStyle.success,
     )
-    async def approve(self, interaction, button):
-        await self.review(interaction, True)
+    async def approve(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await self.review(
+            interaction,
+            True,
+        )
 
     @discord.ui.button(
         label="Deny",
-        style=discord.ButtonStyle.danger
+        style=discord.ButtonStyle.danger,
     )
-    async def deny(self, interaction, button):
-        await self.review(interaction, False)
+    async def deny(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await self.review(
+            interaction,
+            False,
+        )
 
 
-@cad_command(name="warrant", description="Submit a warrant request.")
+@cad_command(
+    name="warrant",
+    description="Submit a warrant request.",
+)
 @app_commands.describe(
     target_name="Name of the person",
     armed="Whether the subject is believed to be armed",
-    reason="Reason for the warrant"
+    reason="Reason for the warrant",
 )
 @app_commands.choices(
     armed=[
-        app_commands.Choice(name="Armed", value="yes"),
-        app_commands.Choice(name="Not armed", value="no")
+        app_commands.Choice(
+            name="Armed",
+            value="yes",
+        ),
+        app_commands.Choice(
+            name="Not armed",
+            value="no",
+        ),
     ]
 )
 async def warrant(
     interaction: discord.Interaction,
     target_name: str,
     armed: app_commands.Choice[str],
-    reason: str
+    reason: str,
 ):
-    channel = bot.get_channel(WARRANT_CONFIRMATION_CHANNEL_ID)
+    channel = bot.get_channel(
+        WARRANT_CONFIRMATION_CHANNEL_ID
+    )
 
-    if not isinstance(channel, discord.TextChannel):
+    if not isinstance(
+        channel,
+        discord.TextChannel,
+    ):
         await interaction.response.send_message(
             "The warrant confirmation channel is unavailable.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
 
     cursor = db.execute(
         """
         INSERT INTO warrants
-        (target_name, armed, reason, requester_id, status, created_at)
+        (
+            target_name,
+            armed,
+            reason,
+            requester_id,
+            status,
+            created_at
+        )
         VALUES (?, ?, ?, ?, 'awaiting_requester', ?)
         """,
         (
@@ -872,71 +1178,133 @@ async def warrant(
             int(armed.value == "yes"),
             reason,
             interaction.user.id,
-            int(time.time())
-        )
+            int(time.time()),
+        ),
     )
+
     db.commit()
 
     warrant_id = cursor.lastrowid
 
     embed = discord.Embed(
-        title=f"Warrant #{warrant_id} | Confirm Your Request",
-        color=discord.Color.red()
+        title=(
+            f"Warrant #{warrant_id} "
+            "| Confirm Your Request"
+        ),
+        color=discord.Color.red(),
     )
-    embed.add_field(name="Target", value=target_name)
-    embed.add_field(name="Armed", value=armed.name)
-    embed.add_field(name="Reason", value=reason, inline=False)
-    embed.add_field(name="Requester", value=interaction.user.mention)
+
+    embed.add_field(
+        name="Target",
+        value=target_name,
+    )
+
+    embed.add_field(
+        name="Armed",
+        value=armed.name,
+    )
+
+    embed.add_field(
+        name="Reason",
+        value=reason,
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Requester",
+        value=interaction.user.mention,
+    )
 
     await channel.send(
         content=interaction.user.mention,
         embed=embed,
-        view=WarrantRequesterView(warrant_id, interaction.user.id)
+        view=WarrantRequesterView(
+            warrant_id,
+            interaction.user.id,
+        ),
     )
 
     audit(
         interaction.user.id,
         "WARRANT_REQUESTED",
-        f"Warrant #{warrant_id}: {target_name}"
+        f"Warrant #{warrant_id}: {target_name}",
     )
 
     await interaction.response.send_message(
-        f"Warrant request **#{warrant_id}** sent for your confirmation.",
-        ephemeral=True
+        (
+            f"Warrant request **#{warrant_id}** "
+            "sent for your confirmation."
+        ),
+        ephemeral=True,
     )
 
 
-@cad_command(name="warrants", description="View warrant records.")
+@cad_command(
+    name="warrants",
+    description="View warrant records.",
+)
 async def warrants(interaction: discord.Interaction):
     rows = db.execute(
-        "SELECT * FROM warrants ORDER BY created_at DESC LIMIT 25"
+        """
+        SELECT *
+        FROM warrants
+        ORDER BY created_at DESC
+        LIMIT 25
+        """
     ).fetchall()
 
     if not rows:
         await interaction.response.send_message(
             "No warrant records exist.",
-            ephemeral=True
+            ephemeral=True,
         )
         return
 
     embed = discord.Embed(
         title="Warrant Records",
-        color=discord.Color.red()
+        color=discord.Color.red(),
     )
 
     for row in rows:
         embed.add_field(
-            name=f"Warrant #{row['id']} | {row['target_name']}",
+            name=(
+                f"Warrant #{row['id']} "
+                f"| {row['target_name']}"
+            ),
             value=(
-                f"Armed: {'Yes' if row['armed'] else 'No'}\n"
+                f"Armed: "
+                f"{'Yes' if row['armed'] else 'No'}\n"
                 f"Reason: {row['reason']}\n"
                 f"Status: **{row['status'].upper()}**\n"
                 f"Requester: <@{row['requester_id']}>"
             ),
-            inline=False
+            inline=False,
         )
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+
+# =====================================================
+# REGISTER SLASH COMMANDS
+# =====================================================
+
+for command in (
+    dp,
+    units,
+    staff_add,
+    staff_remove,
+    staff_list,
+    bolo,
+    bolos,
+    bolo_clear,
+    fine,
+    fines,
+    warrant,
+    warrants,
+):
+    bot.tree.add_command(command)
 
 
 # =====================================================
@@ -944,34 +1312,98 @@ async def warrants(interaction: discord.Interaction):
 # =====================================================
 
 @bot.tree.error
-async def on_app_command_error(interaction, error):
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error,
+):
     if isinstance(error, app_commands.CheckFailure):
-        message = "You are not authorized to use this command."
+        message = (
+            "You are not authorized to use this command."
+        )
 
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    message,
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    message,
+                    ephemeral=True,
+                )
+        except discord.NotFound:
+            pass
+
+        return
+
+    print(
+        "Slash command error:",
+        repr(error),
+    )
+
+    try:
         if interaction.response.is_done():
             await interaction.followup.send(
-                message,
-                ephemeral=True
+                "An internal error occurred.",
+                ephemeral=True,
             )
         else:
             await interaction.response.send_message(
-                message,
-                ephemeral=True
+                "An internal error occurred.",
+                ephemeral=True,
             )
-        return
+    except discord.NotFound:
+        pass
 
-    print("Slash command error:", repr(error))
 
-    if interaction.response.is_done():
-        await interaction.followup.send(
-            "An internal error occurred.",
-            ephemeral=True
+# =====================================================
+# RENDER HEALTH SERVER
+# =====================================================
+
+async def health(request):
+    return web.Response(
+        text="7Rings-law online"
+    )
+
+
+async def start_health_server():
+    app = web.Application()
+
+    app.router.add_get(
+        "/",
+        health,
+    )
+
+    app.router.add_get(
+        "/health",
+        health,
+    )
+
+    runner = web.AppRunner(app)
+
+    await runner.setup()
+
+    port = int(
+        os.getenv(
+            "PORT",
+            "10000",
         )
-    else:
-        await interaction.response.send_message(
-            "An internal error occurred.",
-            ephemeral=True
-        )
+    )
+
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        port,
+    )
+
+    await site.start()
+
+    print(
+        f"Health server listening on 0.0.0.0:{port}"
+    )
+
+    return runner
 
 
 # =====================================================
@@ -980,15 +1412,40 @@ async def on_app_command_error(interaction, error):
 
 @bot.event
 async def on_ready():
-    print(f"CAD online as {bot.user}")
-    print("Department: State Patrol")
-    print("In-game integration: disabled")
-    print("Discord CAD systems loaded.")
+    print(
+        f"CAD online as {bot.user}"
+    )
+
+    print(
+        f"Department: {DEPARTMENT}"
+    )
+
+    print(
+        "In-game integration: disabled"
+    )
+
+    print(
+        "Discord CAD systems loaded."
+    )
 
 
 async def main():
-    async with bot:
-        await bot.start(DISCORD_TOKEN)
+    runner = await start_health_server()
+
+    try:
+        async with bot:
+            synced = await bot.tree.sync()
+
+            print(
+                f"Synced {len(synced)} global slash commands."
+            )
+
+            await bot.start(
+                DISCORD_TOKEN
+            )
+
+    finally:
+        await runner.cleanup()
 
 
 if __name__ == "__main__":
