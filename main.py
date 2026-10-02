@@ -1428,18 +1428,25 @@ async def on_ready():
         "Discord CAD systems loaded."
     )
 
+    try:
+        synced = await bot.tree.sync()
+
+        print(
+            f"Synced {len(synced)} global slash commands."
+        )
+
+    except Exception as error:
+        print(
+            "Slash command sync failed:",
+            repr(error),
+        )
+
 
 async def main():
     runner = await start_health_server()
 
     try:
         async with bot:
-            synced = await bot.tree.sync()
-
-            print(
-                f"Synced {len(synced)} global slash commands."
-            )
-
             await bot.start(
                 DISCORD_TOKEN
             )
